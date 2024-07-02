@@ -1,0 +1,5 @@
+albumentations==1.4.10
+numpy==2.0.0
+opencv_python==4.10.0.84
+segmentation_models_pytorch==0.3.3
+torch==2.2.2+cpu

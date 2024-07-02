@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Camera Capture and Process</title>
+    <style>
+        #croppedCanvas {
+            margin-top: 20px;
+            border: 1px solid black;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Camera Capture and Process</h1>
+    <video id="video" width="854" height="480" autoplay></video>
+    <canvas id="canvas" width="854" height="480" style="display: none;"></canvas>
+    <!-- <canvas id="maskCanvas" width="854" height="480"></canvas>
+    <canvas id="extractedCanvas" width="854" height="480"></canvas> -->
+    <button id="cropButton" disabled>Crop</button>
+    <canvas id="croppedCanvas"></canvas>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        // const maskCanvas = document.getElementById('maskCanvas');
+        // const extractedCanvas = document.getElementById('extractedCanvas');
+        const croppedCanvas = document.getElementById('croppedCanvas');
+        const cropButton = document.getElementById('cropButton');
+
+        const ctx = canvas.getContext('2d');
+        // const maskCtx = maskCanvas.getContext('2d');
+        // const extractedCtx = extractedCanvas.getContext('2d');
+        const croppedCtx = croppedCanvas.getContext('2d');
+
+        let points = [];
+        let draggingPoint = null;
+        let draggingSide = null;
+        let initialMousePos = null;
+        let initialFrameCaptured = false;
+        let frameImage = new Image();
+
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } })
+            .then(stream => {
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    requestAnimationFrame(captureAndSendFrame);
+                };
+            })
+            .catch(err => {
+                console.error("Error accessing webcam: ", err);
+            });
+
+        // Fucntion for sending and fetching the cropped image points from the API
+        function captureAndSendFrame() {
+            if (!initialFrameCaptured) {
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const dataUri = canvas.toDataURL('image/png');
+
+                fetch('http://localhost:3000/process', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ data_uri: dataUri })
+                })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.IDmaskDataUri && data.extractedIDDataUri && data.points) {
+                            // drawDataUriOnCanvas(maskCtx, data.IDmaskDataUri);
+                            // drawDataUriOnCanvas(extractedCtx, data.extractedIDDataUri);
+                            points = data.points.map(point => ({ x: point[0], y: point[1] }));
+                            frameImage.src = dataUri;
+                            frameImage.onload = () => {
+                                drawQuadrilateral();
+                            }
+                            initialFrameCaptured = true;
+                            cropButton.disabled = false;
+                        } else {
+                            captureAndSendFrame();
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                        captureAndSendFrame();
+                    });
+            }
+        }
+
+        function drawDataUriOnCanvas(context, dataUri) {
+            const img = new Image();
+            img.onload = () => {
+                context.clearRect(0, 0, canvas.width, canvas.height);
+                context.drawImage(img, 0, 0, canvas.width, canvas.height);
+            };
+            img.src = dataUri;
+        }
+
+        // Functions for the cropping on canvas part
+
+        function drawQuadrilateral() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(frameImage, 0, 0, canvas.width, canvas.height);
+
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            for (let i = 1; i < points.length; i++) {
+                ctx.lineTo(points[i].x, points[i].y);
+            }
+            ctx.closePath();
+            ctx.strokeStyle = 'red';
+            ctx.stroke();
+
+            points.forEach(point => {
+                ctx.fillStyle = 'red';
+                ctx.beginPath();
+                ctx.arc(point.x, point.y, 5, 0, 2 * 3.1415);
+                ctx.closePath();
+                ctx.fill();
+            });
+        }
+
+        function getMousePos(canvas, evt) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: evt.clientX - rect.left,
+                y: evt.clientY - rect.top
+            };
+        }
+
+        function isPointInRadius(x, y, point, radius) {
+            return Math.sqrt((x - point.x) ** 2 + (y - point.y) ** 2) < radius;
+        }
+
+        function getSideAtPosition(x, y) {
+            for (let i = 0; i < points.length; i++) {
+                const start = points[i];
+                const end = points[(i + 1) % points.length];
+                if (isPointNearLine(x, y, start, end, 5)) {
+                    return i;
+                }
+            }
+            return null;
+        }
+
+        function isPointNearLine(x, y, start, end, tolerance) {
+            const dx = end.x - start.x;
+            const dy = end.y - start.y;
+            const length = Math.sqrt(dx * dx + dy * dy);
+            const distance = Math.abs(dy * x - dx * y + end.x * start.y - end.y * start.x) / length;
+            return distance < tolerance;
+        }
+
+        function moveSide(sideIndex, dx, dy) {
+            const start = points[sideIndex];
+            const end = points[(sideIndex + 1) % points.length];
+            start.x += dx;
+            start.y += dy;
+            end.x += dx;
+            end.y += dy;
+        }
+
+        function cropQuadrilateral() {
+            const minX = Math.min(...points.map(p => p.x));
+            const minY = Math.min(...points.map(p => p.y));
+            const maxX = Math.max(...points.map(p => p.x));
+            const maxY = Math.max(...points.map(p => p.y));
+
+            const offscreenCanvas = document.createElement('canvas');
+            const offscreenCtx = offscreenCanvas.getContext('2d');
+            offscreenCanvas.width = maxX - minX;
+            offscreenCanvas.height = maxY - minY;
+
+            offscreenCtx.drawImage(frameImage, -minX, -minY);
+
+            const imageData = offscreenCtx.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+            const data = imageData.data;
+
+            const mask = new Uint8ClampedArray(data.length);
+
+            function isInsidePolygon(x, y) {
+                let inside = false;
+                for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+                    const xi = points[i].x, yi = points[i].y;
+                    const xj = points[j].x, yj = points[j].y;
+
+                    const intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+                    if (intersect) inside = !inside;
+                }
+                return inside;
+            }
+
+            for (let y = 0; y < offscreenCanvas.height; y++) {
+                for (let x = 0; x < offscreenCanvas.width; x++) {
+                    if (isInsidePolygon(x + minX, y + minY)) {
+                        const index = (y * offscreenCanvas.width + x) * 4;
+                        mask[index] = data[index];
+                        mask[index + 1] = data[index + 1];
+                        mask[index + 2] = data[index + 2];
+                        mask[index + 3] = data[index + 3];
+                    }
+                }
+            }
+
+            const croppedImageData = new ImageData(mask, offscreenCanvas.width, offscreenCanvas.height);
+            croppedCanvas.width = offscreenCanvas.width;
+            croppedCanvas.height = offscreenCanvas.height;
+            croppedCtx.putImageData(croppedImageData, 0, 0);
+        }
+
+        // Event listeners on the canvas for detecting user input for crop
+
+        canvas.addEventListener('mousedown', (e) => {
+            const { x, y } = getMousePos(canvas, e);
+            draggingPoint = points.find(point => isPointInRadius(x, y, point, 5));
+            if (!draggingPoint) {
+                draggingSide = getSideAtPosition(x, y);
+                initialMousePos = { x, y };
+            }
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (draggingPoint) {
+                const { x, y } = getMousePos(canvas, e);
+                draggingPoint.x = x;
+                draggingPoint.y = y;
+                drawQuadrilateral();
+            } else if (draggingSide !== null) {
+                const { x, y } = getMousePos(canvas, e);
+                const dx = x - initialMousePos.x;
+                const dy = y - initialMousePos.y;
+                moveSide(draggingSide, dx, dy);
+                initialMousePos = { x, y };
+                drawQuadrilateral();
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            draggingPoint = null;
+            draggingSide = null;
+        });
+
+        cropButton.addEventListener('click', cropQuadrilateral);
+    </script>
+</body>
+
+</html>
