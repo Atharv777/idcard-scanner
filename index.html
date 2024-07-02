@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
-
+    
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -11,6 +11,7 @@
             border: 1px solid black;
         }
     </style>
+    <script src="opencv.js" type="text/javascript"></script>
 </head>
 
 <body>
@@ -19,8 +20,9 @@
     <canvas id="canvas" width="854" height="480" style="display: none;"></canvas>
     <!-- <canvas id="maskCanvas" width="854" height="480"></canvas>
     <canvas id="extractedCanvas" width="854" height="480"></canvas> -->
-    <button id="cropButton" disabled>Crop</button>
-    <canvas id="croppedCanvas"></canvas>
+    <canvas id="croppedCanvas" style="display: none;"></canvas>
+    <button id="cropButton" disabled style="display: none;">Crop</button>
+
 
     <script>
         const video = document.getElementById('video');
@@ -41,6 +43,7 @@
         let initialMousePos = null;
         let initialFrameCaptured = false;
         let frameImage = new Image();
+        let cleanCanvasImage = null;
 
         navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } })
             .then(stream => {
@@ -59,7 +62,9 @@
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                 const dataUri = canvas.toDataURL('image/png');
 
-                fetch('http://localhost:3000/process', {
+                let attempts = 0
+
+                fetch('http://localhost:5000/process', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -68,22 +73,32 @@
                 })
                     .then(response => response.json())
                     .then(data => {
+
                         if (data.IDmaskDataUri && data.extractedIDDataUri && data.points) {
-                            // drawDataUriOnCanvas(maskCtx, data.IDmaskDataUri);
-                            // drawDataUriOnCanvas(extractedCtx, data.extractedIDDataUri);
-                            points = data.points.map(point => ({ x: point[0], y: point[1] }));
-                            frameImage.src = dataUri;
-                            frameImage.onload = () => {
-                                drawQuadrilateral();
+                            if(attempts == 0){
+                                attempts = 1
+                                captureAndSendFrame();
                             }
-                            initialFrameCaptured = true;
-                            cropButton.disabled = false;
+                            if(attempts == 1){
+                                // drawDataUriOnCanvas(maskCtx, data.IDmaskDataUri);
+                                // drawDataUriOnCanvas(extractedCtx, data.extractedIDDataUri);
+                                points = data.points.map(point => ({ x: point[0], y: point[1] }));
+                                frameImage.src = dataUri;
+                                frameImage.onload = () => {
+                                    cleanCanvasImage = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                                    drawQuadrilateral();
+                                }
+                                initialFrameCaptured = true;
+                                cropButton.disabled = false;
+                            }
                         } else {
+                            attempts = 0
                             captureAndSendFrame();
                         }
                     })
                     .catch(error => {
                         console.error('Error:', error);
+                        attempts = 0
                         captureAndSendFrame();
                     });
             }
@@ -101,6 +116,12 @@
         // Functions for the cropping on canvas part
 
         function drawQuadrilateral() {
+
+            canvas.style.display = "block"
+            video.style.display = "none"
+            cropButton.style.display = "block"
+            croppedCanvas.style.display = "block"
+
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(frameImage, 0, 0, canvas.width, canvas.height);
 
@@ -163,52 +184,54 @@
         }
 
         function cropQuadrilateral() {
-            const minX = Math.min(...points.map(p => p.x));
-            const minY = Math.min(...points.map(p => p.y));
-            const maxX = Math.max(...points.map(p => p.x));
-            const maxY = Math.max(...points.map(p => p.y));
-
             const offscreenCanvas = document.createElement('canvas');
             const offscreenCtx = offscreenCanvas.getContext('2d');
-            offscreenCanvas.width = maxX - minX;
-            offscreenCanvas.height = maxY - minY;
+            offscreenCanvas.width = canvas.width;
+            offscreenCanvas.height = canvas.height;
+            offscreenCtx.drawImage(frameImage, 0, 0, canvas.width, canvas.height);
 
-            offscreenCtx.drawImage(frameImage, -minX, -minY);
+            const src = cv.imread(offscreenCanvas);
 
-            const imageData = offscreenCtx.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
-            const data = imageData.data;
+            const srcPoints = cv.matFromArray(4, 2, cv.CV_32FC1, [
+                points[0].x, points[0].y,
+                points[1].x, points[1].y,
+                points[2].x, points[2].y,
+                points[3].x, points[3].y
+            ]);
 
-            const mask = new Uint8ClampedArray(data.length);
+            const maxWidth = Math.max(
+                Math.sqrt(Math.pow(points[1].x - points[0].x, 2) + Math.pow(points[1].y - points[0].y, 2)),
+                Math.sqrt(Math.pow(points[2].x - points[3].x, 2) + Math.pow(points[2].y - points[3].y, 2))
+            );
 
-            function isInsidePolygon(x, y) {
-                let inside = false;
-                for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-                    const xi = points[i].x, yi = points[i].y;
-                    const xj = points[j].x, yj = points[j].y;
+            const maxHeight = Math.max(
+                Math.sqrt(Math.pow(points[3].x - points[0].x, 2) + Math.pow(points[3].y - points[0].y, 2)),
+                Math.sqrt(Math.pow(points[2].x - points[1].x, 2) + Math.pow(points[2].y - points[1].y, 2))
+            );
 
-                    const intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-                    if (intersect) inside = !inside;
-                }
-                return inside;
-            }
+            const dstPoints = cv.matFromArray(4, 2, cv.CV_32FC1, [
+                maxWidth - 1, 0,
+                0, 0,
+                0, maxHeight - 1,
+                maxWidth - 1, maxHeight - 1,
+            ]);
 
-            for (let y = 0; y < offscreenCanvas.height; y++) {
-                for (let x = 0; x < offscreenCanvas.width; x++) {
-                    if (isInsidePolygon(x + minX, y + minY)) {
-                        const index = (y * offscreenCanvas.width + x) * 4;
-                        mask[index] = data[index];
-                        mask[index + 1] = data[index + 1];
-                        mask[index + 2] = data[index + 2];
-                        mask[index + 3] = data[index + 3];
-                    }
-                }
-            }
+            const M = cv.getPerspectiveTransform(srcPoints, dstPoints);
+            const dsize = new cv.Size(maxWidth, maxHeight);
+            const dst = new cv.Mat();
+            cv.warpPerspective(src, dst, M, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
 
-            const croppedImageData = new ImageData(mask, offscreenCanvas.width, offscreenCanvas.height);
-            croppedCanvas.width = offscreenCanvas.width;
-            croppedCanvas.height = offscreenCanvas.height;
-            croppedCtx.putImageData(croppedImageData, 0, 0);
+            croppedCanvas.width = maxWidth;
+            croppedCanvas.height = maxHeight;
+            cv.imshow(croppedCanvas, dst);
+
+            src.delete();
+            srcPoints.delete();
+            dstPoints.delete();
+            M.delete();
+            dst.delete();
         }
+
 
         // Event listeners on the canvas for detecting user input for crop
 

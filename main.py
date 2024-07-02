@@ -68,4 +68,4 @@ def process_data_uri():
         return jsonify({"error": str(e), "message": "Internal Server Error"}), 500
 
 if __name__ == '__main__':
-    app.run(port=3000)
+    app.run(port=5000)
